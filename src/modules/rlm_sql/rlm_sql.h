@@ -47,6 +47,7 @@ typedef struct rlm_sql_module_t {
 	int (*sql_destroy_socket)(SQLSOCK *sqlsocket, SQL_CONFIG *config);
 	int (*sql_query)(SQLSOCK *sqlsocket, SQL_CONFIG *config, char *query);
 	int (*sql_select_query)(SQLSOCK *sqlsocket, SQL_CONFIG *config, char *query);
+	int (*sql_select_query_bind)(SQLSOCK *sqlsocket, SQL_CONFIG *config, char *query, char *sql_user_name_bind);  // Vinogradov 25.10.2023
 	int (*sql_store_result)(SQLSOCK *sqlsocket, SQL_CONFIG *config);
 	int (*sql_num_fields)(SQLSOCK *sqlsocket, SQL_CONFIG *config);
 	int (*sql_num_rows)(SQLSOCK *sqlsocket, SQL_CONFIG *config);
@@ -78,6 +79,7 @@ struct sql_inst {
 	size_t (*sql_escape_func)(char *out, size_t outlen, const char *in);
 	int (*sql_query)(SQLSOCK *sqlsocket, SQL_INST *inst, char *query);
 	int (*sql_select_query)(SQLSOCK *sqlsocket, SQL_INST *inst, char *query);
+	int (*sql_select_query_bind)(SQLSOCK *sqlsocket, SQL_CONFIG *config, char *query, char *sql_user_name_bind);  // Vinogradov 25.10.2023
 	int (*sql_fetch_row)(SQLSOCK *sqlsocket, SQL_INST *inst);
 };
 
@@ -95,11 +97,13 @@ int     sql_release_socket(SQL_INST * inst, SQLSOCK * sqlsocket);
 int     sql_userparse(VALUE_PAIR ** first_pair, SQL_ROW row);
 int     sql_read_realms(SQLSOCK * sqlsocket);
 int     sql_getvpdata(SQL_INST * inst, SQLSOCK * sqlsocket, VALUE_PAIR **pair, char *query);
+int     sql_getvpdata_bind(SQL_INST * inst, SQLSOCK * sqlsocket, VALUE_PAIR **pair, char *query, char *sql_user_name_bind);	// Vinogradov 25.10.2023
 int     sql_read_naslist(SQLSOCK * sqlsocket);
 int     sql_read_clients(SQLSOCK * sqlsocket);
 int     sql_dict_init(SQLSOCK * sqlsocket);
 void    query_log(REQUEST *request, SQL_INST * inst, char *querystr);
 int	rlm_sql_select_query(SQLSOCK *sqlsocket, SQL_INST *inst, char *query);
+int	rlm_sql_select_query_bind(SQLSOCK *sqlsocket, SQL_INST *inst, char *query, char *sql_user_name_bind);  // Vinogradov 25.10.2023
 int	rlm_sql_query(SQLSOCK *sqlsocket, SQL_INST *inst, char *query);
 int	rlm_sql_fetch_row(SQLSOCK *sqlsocket, SQL_INST *inst);
 int	sql_set_user(SQL_INST *inst, REQUEST *request, char *sqlusername, const char *username);

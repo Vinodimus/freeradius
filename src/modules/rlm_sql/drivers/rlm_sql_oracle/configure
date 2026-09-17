@@ -2726,7 +2726,7 @@ rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
 		if test "x$oracle_lib_dir" != "x" ; then
 			ORACLE_LIBDIR_SWITCH="-L${oracle_lib_dir} "
 		fi
-		for oracle_version in 10 11 9 ""; do
+		for oracle_version in 12 19 21 23 10 11 9 ""; do # Vinogradov  add version 12,21,19 25.10.2023
 			LIBS="$old_LIBS $ORACLE_LIBDIR_SWITCH -lclntsh -lnnz${oracle_version}"
 			cat >conftest.$ac_ext <<_ACEOF
 /* confdefs.h.  */

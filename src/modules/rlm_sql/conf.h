@@ -22,6 +22,8 @@ typedef struct sql_config {
 	char   *query_user;
 	char   *default_profile;
 	char   *nas_query;
+	char   *authorize_query;            // Vinogradov 28.04.2023
+	char   *sql_user_name_bind;         // Vinogradov 25.10.2023
 	char   *authorize_check_query;
 	char   *authorize_reply_query;
 	char   *authorize_group_check_query;

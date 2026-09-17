@@ -555,6 +555,8 @@ int rlm_sql_select_query(SQLSOCK *sqlsocket, SQL_INST *inst, char *query)
 {
 	int ret;
 
+	DEBUG2("rlm_sql_select_query");
+
 	/*
 	 *	If there's no query, return an error.
 	 */
@@ -597,6 +599,63 @@ int rlm_sql_select_query(SQLSOCK *sqlsocket, SQL_INST *inst, char *query)
 
 /*************************************************************************
  *
+ *	Vinogradov 25.10.2023
+ *
+ *	Function: rlm_sql_select_query_bind
+ *
+ *	Purpose: call the module's sql_select_query_bind with oracle OCI Bind and implement re-connect
+ *
+ *************************************************************************/
+int rlm_sql_select_query_bind(SQLSOCK *sqlsocket, SQL_INST *inst, char *query, char *sql_user_name_bind)
+{
+	int ret;
+
+	DEBUG2("rlm_sql_select_query_bind");
+
+	/*
+	 *	If there's no query, return an error.
+	 */
+	if (!query || !*query) {
+		return -1;
+	}
+
+	if (sqlsocket->conn) {
+		ret = (inst->module->sql_select_query_bind)(sqlsocket, inst->config,
+						       query, sql_user_name_bind);
+	} else {
+		ret = SQL_DOWN;
+	}
+
+	if (ret == SQL_DOWN) {
+	        /* close the socket that failed */
+		if (sqlsocket->state == sockconnected) {
+			(inst->module->sql_close)(sqlsocket, inst->config);
+		}
+
+		/* reconnect the socket */
+		if (connect_single_socket(sqlsocket, inst) < 0) {
+			radlog(L_ERR, "rlm_sql (%s): reconnect failed, database down?", inst->config->xlat_name);
+			return -1;
+		}
+
+		/* retry the query on the newly connected socket */
+		ret = (inst->module->sql_select_query_bind)(sqlsocket, inst->config, query, sql_user_name_bind);
+
+		if (ret) {
+			radlog(L_ERR, "rlm_sql (%s): failed after re-connect",
+			       inst->config->xlat_name);
+			return -1;
+		}
+	}
+
+	return ret;
+}
+
+
+
+
+/*************************************************************************
+ *
  *	Function: sql_getvpdata
  *
  *	Purpose: Get any group check or reply pairs
@@ -606,6 +665,8 @@ int sql_getvpdata(SQL_INST * inst, SQLSOCK * sqlsocket, VALUE_PAIR **pair, char 
 {
 	SQL_ROW row;
 	int     rows = 0;
+
+	DEBUG2("sql_getvpdata");
 
 	if (rlm_sql_select_query(sqlsocket, inst, query)) {
 		radlog(L_ERR, "rlm_sql_getvpdata: database query error");
@@ -626,6 +687,43 @@ int sql_getvpdata(SQL_INST * inst, SQLSOCK * sqlsocket, VALUE_PAIR **pair, char 
 
 	return rows;
 }
+
+/*************************************************************************
+ *
+ *	Vinogradov 25.10.2023
+ *
+ *	Function: sql_getvpdata_bind
+ *
+ *	Purpose: Get check or reply pairs with oracle OCI Bind
+ *
+ *************************************************************************/
+int sql_getvpdata_bind(SQL_INST * inst, SQLSOCK * sqlsocket, VALUE_PAIR **pair, char *query, char *sql_user_name_bind)
+{
+	SQL_ROW row;
+	int     rows = 0;
+
+	DEBUG2("sql_getvpdata_bind");
+
+	if (rlm_sql_select_query_bind(sqlsocket, inst, query, sql_user_name_bind)) {
+		radlog(L_ERR, "rlm_sql_getvpdata_bind: database query error");
+		return -1;
+	}
+	while (rlm_sql_fetch_row(sqlsocket, inst)==0) {
+		row = sqlsocket->row;
+		if (!row)
+			break;
+		if (sql_userparse(pair, row) != 0) {
+			radlog(L_ERR | L_CONS, "rlm_sql (%s): Error getting data from database", inst->config->xlat_name);
+			(inst->module->sql_finish_select_query)(sqlsocket, inst->config);
+			return -1;
+		}
+		rows++;
+	}
+	(inst->module->sql_finish_select_query)(sqlsocket, inst->config);
+
+	return rows;
+}
+
 
 void query_log(REQUEST *request, SQL_INST *inst, char *querystr)
 {

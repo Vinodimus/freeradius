@@ -69,10 +69,14 @@ static const CONF_PARSER module_config[] = {
 	 offsetof(SQL_CONFIG,max_queries), NULL, "0"},
 	{"sql_user_name", PW_TYPE_STRING_PTR,
 	 offsetof(SQL_CONFIG,query_user), NULL, ""},
+	{"sql_user_name_bind", PW_TYPE_STRING_PTR,					// Vinogradov 25.10.2023
+	 offsetof(SQL_CONFIG,sql_user_name_bind), NULL, ""},
 	{"default_user_profile", PW_TYPE_STRING_PTR,
 	 offsetof(SQL_CONFIG,default_profile), NULL, ""},
 	{"nas_query", PW_TYPE_STRING_PTR,
 	 offsetof(SQL_CONFIG,nas_query), NULL, "SELECT id,nasname,shortname,type,secret FROM nas"},
+	{"authorize_query", PW_TYPE_STRING_PTR,						// Vinogradov 28.04.2023
+	 offsetof(SQL_CONFIG,authorize_query), NULL, ""},				
 	{"authorize_check_query", PW_TYPE_STRING_PTR,
 	 offsetof(SQL_CONFIG,authorize_check_query), NULL, ""},
 	{"authorize_reply_query", PW_TYPE_STRING_PTR,
@@ -550,6 +554,7 @@ static int sql_get_grouplist (SQL_INST *inst, SQLSOCK *sqlsocket, REQUEST *reque
 	int     num_groups = 0;
 	SQL_ROW row;
 	SQL_GROUPLIST   *group_list_tmp;
+        char    sql_user_name_bind[MAX_STRING_LEN]; // Vinogradov 25.10.2023
 
 	/* NOTE: sql_set_user should have been run before calling this function */
 
@@ -565,13 +570,29 @@ static int sql_get_grouplist (SQL_INST *inst, SQLSOCK *sqlsocket, REQUEST *reque
 		return -1;
 	}
 
-	if (rlm_sql_select_query(sqlsocket, inst, querystr) < 0) {
-		radlog_request(L_ERR, 0, request,
+	radius_xlat(sql_user_name_bind, sizeof(sql_user_name_bind), inst->config->sql_user_name_bind, request, sql_escape_func);
+	if(*sql_user_name_bind && strstr(querystr,":sql_user_name_bind")) {	// If the sql_user_name_bind variable is defined and there is a bind variable in the query -  Vinogradov 25.10.2023
+
+	    RDEBUG2("sql_get_grouplist: sql_user_name_bind  --> %s", sql_user_name_bind);
+
+	    if (rlm_sql_select_query_bind(sqlsocket, inst, querystr, sql_user_name_bind) < 0) {
+		    radlog_request(L_ERR, 0, request,
 			       "database query error, %s: %s",
 			       querystr,
 		       (inst->module->sql_error)(sqlsocket,inst->config));
 		return -1;
+	    }
+	} else {
+
+	    if (rlm_sql_select_query(sqlsocket, inst, querystr) < 0) {
+		    radlog_request(L_ERR, 0, request,
+			       "database query error, %s: %s",
+			       querystr,
+		       (inst->module->sql_error)(sqlsocket,inst->config));
+		return -1;
+	    }
 	}
+
 	while (rlm_sql_fetch_row(sqlsocket, inst) == 0) {
 		row = sqlsocket->row;
 		if (row == NULL)
@@ -875,6 +896,7 @@ static int rlm_sql_instantiate(CONF_SECTION * conf, void **instance)
 	inst->sql_escape_func = sql_escape_func;
 	inst->sql_query = rlm_sql_query;
 	inst->sql_select_query = rlm_sql_select_query;
+	inst->sql_select_query_bind = rlm_sql_select_query_bind;	// Vinogradov 25.10.2023
 	inst->sql_fetch_row = rlm_sql_fetch_row;
 
 	/*
@@ -1022,6 +1044,7 @@ static int rlm_sql_authorize(void *instance, REQUEST * request)
 	SQL_INST *inst = instance;
 	char    querystr[MAX_QUERY_LEN];
 	char	sqlusername[MAX_STRING_LEN];
+	char	sql_user_name_bind[MAX_STRING_LEN]; // Vinogradov 25.10.2023
 	/*
 	 * the profile username is used as the sqlusername during
 	 * profile checking so that we don't overwrite the orignal
@@ -1034,6 +1057,29 @@ static int rlm_sql_authorize(void *instance, REQUEST * request)
 	 */
 	if (sql_set_user(inst, request, sqlusername, NULL) < 0)
 		return RLM_MODULE_FAIL;
+
+
+	/*
+	* Writing authorization packets to the database
+        * Last change: 2023-04-28 - I added query_log and moved the SQL query to the config file - Vinogradov
+ 	*/
+	radius_xlat(querystr, sizeof(querystr), inst->config->authorize_query, request, sql_escape_func);
+	query_log(request, inst, querystr);
+	sqlsocket = sql_get_socket(inst);
+	if (sqlsocket == NULL)
+		return(RLM_MODULE_FAIL);
+	if (*querystr) { /* non-empty query */
+		if (rlm_sql_query(sqlsocket, inst, querystr)) {
+			radlog_request(L_ERR, 0, request, "Couldn't insert SQL authorize record - %s",
+		       (inst->module->sql_error)(sqlsocket, inst->config));
+		}
+		/*
+		 *	If no one is online, num_affected_rows
+		 *	will be zero, which is OK.
+		 */
+		(inst->module->sql_finish_query)(sqlsocket, inst->config);
+	}
+	sql_release_socket(inst, sqlsocket);
 
 
 	/*
@@ -1061,7 +1107,16 @@ static int rlm_sql_authorize(void *instance, REQUEST * request)
 		pairdelete(&request->packet->vps, PW_SQL_USER_NAME);
 		return RLM_MODULE_FAIL;
 	}
-	rows = sql_getvpdata(inst, sqlsocket, &check_tmp, querystr);
+
+	radius_xlat(sql_user_name_bind, sizeof(sql_user_name_bind), inst->config->sql_user_name_bind, request, sql_escape_func);
+	if(*sql_user_name_bind && strstr(querystr,":sql_user_name_bind")) {	// If the sql_user_name_bind variable is defined and there is a bind variable in the query -  Vinogradov 25.10.2023
+
+	    RDEBUG2("rlm_sql_authorize: sql_user_name_bind  --> %s", sql_user_name_bind);
+
+	    rows = sql_getvpdata_bind(inst, sqlsocket, &check_tmp, querystr, sql_user_name_bind);
+	}
+	else
+    	    rows = sql_getvpdata(inst, sqlsocket, &check_tmp, querystr);
 	if (rows < 0) {
 		radlog_request(L_ERR, 0, request, "SQL query error; rejecting user");
 		sql_release_socket(inst, sqlsocket);
@@ -1091,14 +1146,27 @@ static int rlm_sql_authorize(void *instance, REQUEST * request)
 				pairfree(&check_tmp);
 				return RLM_MODULE_FAIL;
 			}
-			if (sql_getvpdata(inst, sqlsocket, &reply_tmp, querystr) < 0) {
-				radlog_request(L_ERR, 0, request, "SQL query error; rejecting user");
-				sql_release_socket(inst, sqlsocket);
-				/* Remove the username we (maybe) added above */
-				pairdelete(&request->packet->vps, PW_SQL_USER_NAME);
-				pairfree(&check_tmp);
-				pairfree(&reply_tmp);
-				return RLM_MODULE_FAIL;
+
+			if(*sql_user_name_bind && strstr(querystr,":sql_user_name_bind")) {	// If the sql_user_name_bind variable is defined and there is a bind variable in the query -  Vinogradov 25.10.2023
+				if (sql_getvpdata_bind(inst, sqlsocket, &reply_tmp, querystr, sql_user_name_bind) < 0) {
+				    radlog_request(L_ERR, 0, request, "SQL query error; rejecting user");
+				    sql_release_socket(inst, sqlsocket);
+				    /* Remove the username we (maybe) added above */
+				    pairdelete(&request->packet->vps, PW_SQL_USER_NAME);
+				    pairfree(&check_tmp);
+				    pairfree(&reply_tmp);
+				    return RLM_MODULE_FAIL;
+				}
+			} else {
+				if (sql_getvpdata(inst, sqlsocket, &reply_tmp, querystr) < 0) {
+				    radlog_request(L_ERR, 0, request, "SQL query error; rejecting user");
+				    sql_release_socket(inst, sqlsocket);
+				    /* Remove the username we (maybe) added above */
+				    pairdelete(&request->packet->vps, PW_SQL_USER_NAME);
+				    pairfree(&check_tmp);
+				    pairfree(&reply_tmp);
+				    return RLM_MODULE_FAIL;
+				}
 			}
 
 			if (!inst->config->read_groups)
@@ -1457,6 +1525,7 @@ static int rlm_sql_checksimul(void *instance, REQUEST * request) {
 	int		ret;
 	uint32_t	nas_addr = 0;
 	int		nas_port = 0;
+	char		sql_user_name_bind[MAX_STRING_LEN]; // Vinogradov 25.10.2023
 
 	/* If simul_count_query is not defined, we don't do any checking */
 	if (!inst->config->simul_count_query ||
@@ -1520,10 +1589,25 @@ static int rlm_sql_checksimul(void *instance, REQUEST * request) {
 	}
 
 	radius_xlat(querystr, sizeof(querystr), inst->config->simul_verify_query, request, sql_escape_func);
-	if(rlm_sql_select_query(sqlsocket, inst, querystr)) {
-		radlog_request(L_ERR, 0, request, "Database query error");
-		sql_release_socket(inst, sqlsocket);
-		return RLM_MODULE_FAIL;
+
+	radius_xlat(sql_user_name_bind, sizeof(sql_user_name_bind), inst->config->sql_user_name_bind, request, sql_escape_func);
+	if(*sql_user_name_bind && strstr(querystr,":sql_user_name_bind")) {	// If the sql_user_name_bind variable is defined and there is a bind variable in the query -  Vinogradov 25.10.2023
+
+	    RDEBUG2("rlm_sql_checksimul: sql_user_name_bind  --> %s", sql_user_name_bind);
+
+	    if(rlm_sql_select_query_bind(sqlsocket, inst, querystr, sql_user_name_bind)) {
+	    	    radlog_request(L_ERR, 0, request, "Database query error");
+		    sql_release_socket(inst, sqlsocket);
+		    return RLM_MODULE_FAIL;
+	    }
+
+	} else {
+
+	    if(rlm_sql_select_query(sqlsocket, inst, querystr)) {
+	    	    radlog_request(L_ERR, 0, request, "Database query error");
+		    sql_release_socket(inst, sqlsocket);
+		    return RLM_MODULE_FAIL;
+	    }
 	}
 
         /*

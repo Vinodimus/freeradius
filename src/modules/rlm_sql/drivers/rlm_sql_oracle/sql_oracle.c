@@ -299,6 +299,8 @@ static int sql_select_query(SQLSOCK *sqlsocket, SQL_CONFIG *config, char *querys
 	sb2		*indicators;
 	rlm_sql_oracle_sock *oracle_sock = sqlsocket->conn;
 
+	DEBUG2("sql_select_query");
+
 	if (config->sqltrace)
 		DEBUG(querystr);
 	if (oracle_sock->conn == NULL) {
@@ -446,6 +448,198 @@ static int sql_select_query(SQLSOCK *sqlsocket, SQL_CONFIG *config, char *querys
 
 	return 0;
 }
+
+/*************************************************************************
+ *      Vinogradov 25.10.2023
+ *
+ *	Function: sql_select_query_bind
+ *
+ *	Purpose: Issue a select query to the database
+ *
+ *************************************************************************/
+static int sql_select_query_bind(SQLSOCK *sqlsocket, SQL_CONFIG *config, char *querystr, char *sql_user_name_bind) {
+
+	int		x;
+	int		y;
+	int		colcount;
+	OCIParam	*param;
+	OCIDefine	*define;
+	ub2		dtype;
+	ub2		dsize;
+	char		**rowdata=NULL;
+	sb2		*indicators;
+	rlm_sql_oracle_sock *oracle_sock = sqlsocket->conn;
+	static OCIBind  *bnd1p = (OCIBind *) 0;          /* the first bind handle */
+
+	DEBUG2("sql_select_query_bind");
+
+	if (config->sqltrace)
+		DEBUG(querystr);
+	if (oracle_sock->conn == NULL) {
+		radlog(L_ERR, "rlm_sql_oracle: Socket not connected");
+		return SQL_DOWN;
+	}
+
+	if (OCIStmtPrepare (oracle_sock->queryHandle, oracle_sock->errHandle,
+				querystr, strlen(querystr),
+				OCI_NTV_SYNTAX, OCI_DEFAULT))  {
+		radlog(L_ERR,"rlm_sql_oracle: prepare failed in sql_select_query_bind: %s",sql_error(sqlsocket, config));
+		return -1;
+	}
+
+	if (OCIBindByName (oracle_sock->queryHandle,
+				&bnd1p,
+				oracle_sock->errHandle,
+				(text *) ":SQL_USER_NAME_BIND",
+				-1,
+				(dvoid *) sql_user_name_bind,
+				strlen(sql_user_name_bind)+1,
+				SQLT_STR,
+				(dvoid *) 0,
+				(ub2 *) 0,
+				(ub2 *) 0,
+				(ub4) 0,
+				(ub4 *) 0,
+				OCI_DEFAULT))	{
+		radlog(L_ERR,"rlm_sql_oracle: bind failed in sql_select_query_bind: %s",sql_error(sqlsocket, config));
+		return -1;
+	}
+
+
+	/* Query only one row by default (for now) */
+	x = OCIStmtExecute(oracle_sock->conn,
+				oracle_sock->queryHandle,
+				oracle_sock->errHandle,
+				(ub4) 0,
+				(ub4) 0,
+				(OCISnapshot *) NULL,
+				(OCISnapshot *) NULL,
+				(ub4) OCI_DEFAULT);
+
+	if (x == OCI_NO_DATA) {
+		/* Nothing to fetch */
+		return 0;
+	}
+
+	if (x != OCI_SUCCESS) {
+		radlog(L_ERR,"rlm_sql_oracle: query failed in sql_select_query_bind: %s",
+				sql_error(sqlsocket, config));
+		return sql_check_error(sqlsocket, config);
+	}
+
+	/*
+	 * Define where the output from fetch calls will go
+	 *
+	 * This is a gross hack, but it works - we convert
+	 * all data to strings for ease of use.  Fortunately, most
+	 * of the data we deal with is already in string format.
+	 */
+	colcount = sql_num_fields(sqlsocket, config);
+
+	DEBUG2("sql_select_query_bind(): colcount=%d",colcount);
+
+	/*
+	 *	FIXME: These malloc's can probably go, as the schema
+	 *	is fixed...
+	 */
+	rowdata=(char **)rad_malloc(sizeof(char *) * (colcount+1) );
+	memset(rowdata, 0, (sizeof(char *) * (colcount+1) ));
+	indicators = (sb2 *) rad_malloc(sizeof(sb2) * (colcount+1) );
+	memset(indicators, 0, sizeof(sb2) * (colcount+1));
+
+	for (y=1; y <= colcount; y++) {
+		x=OCIParamGet(oracle_sock->queryHandle, OCI_HTYPE_STMT,
+				oracle_sock->errHandle,
+				(dvoid **)&param,
+				(ub4) y);
+		if (x != OCI_SUCCESS) {
+			radlog(L_ERR,"rlm_sql_oracle: OCIParamGet() failed in sql_select_query_bind: %s",
+				sql_error(sqlsocket, config));
+			return -1;
+		}
+
+		x=OCIAttrGet((dvoid*)param, OCI_DTYPE_PARAM,
+			   (dvoid*)&dtype, (ub4*)0, OCI_ATTR_DATA_TYPE,
+			   oracle_sock->errHandle);
+		if (x != OCI_SUCCESS) {
+			radlog(L_ERR,"rlm_sql_oracle: OCIAttrGet() failed in sql_select_query_bind: %s",
+				sql_error(sqlsocket, config));
+			return -1;
+		}
+
+		dsize=MAX_DATASTR_LEN;
+
+		/*
+		 * Use the retrieved length of dname to allocate an output
+		 * buffer, and then define the output variable (but only
+		 * for char/string type columns).
+		 */
+		switch(dtype) {
+#ifdef SQLT_AFC
+		case SQLT_AFC:	/* ansii fixed char */
+#endif
+#ifdef SQLT_AFV
+		case SQLT_AFV:	/* ansii var char */
+#endif
+		case SQLT_VCS:	/* var char */
+		case SQLT_CHR:	/* char */
+		case SQLT_STR:	/* string */
+			x=OCIAttrGet((dvoid*)param, (ub4) OCI_DTYPE_PARAM,
+				   (dvoid*) &dsize, (ub4 *)0, (ub4) OCI_ATTR_DATA_SIZE,
+				   oracle_sock->errHandle);
+			if (x != OCI_SUCCESS) {
+				radlog(L_ERR,"rlm_sql_oracle: OCIAttrGet() failed in sql_select_query_bind: %s",
+					sql_error(sqlsocket, config));
+				return -1;
+			}
+			rowdata[y-1]=rad_malloc(dsize+1);
+			memset(rowdata[y-1], 0, dsize+1);
+			break;
+		case SQLT_DAT:
+		case SQLT_INT:
+		case SQLT_UIN:
+		case SQLT_FLT:
+		case SQLT_PDN:
+		case SQLT_BIN:
+		case SQLT_NUM:
+			rowdata[y-1]=rad_malloc(dsize+1);
+			memset(rowdata[y-1], 0, dsize+1);
+			break;
+		default:
+			dsize=0;
+			rowdata[y-1]=NULL;
+			break;
+		}
+
+		indicators[y-1] = 0;
+		x=OCIDefineByPos(oracle_sock->queryHandle,
+				&define,
+				oracle_sock->errHandle,
+				y,
+				(ub1 *) rowdata[y-1],
+				dsize+1,
+				SQLT_STR,
+				&indicators[y-1],
+				(dvoid *) 0,
+				(dvoid *) 0,
+				OCI_DEFAULT);
+
+		/*
+		 *	FIXME: memory leaks of indicators & rowdata?
+		 */
+		if (x != OCI_SUCCESS) {
+			radlog(L_ERR,"rlm_sql_oracle: OCIDefineByPos() failed in sql_select_query_bind: %s",
+				sql_error(sqlsocket, config));
+			return -1;
+		}
+	}
+
+	oracle_sock->results=rowdata;
+	oracle_sock->indicators=indicators;
+
+	return 0;
+}
+
 
 
 /*************************************************************************
@@ -624,6 +818,7 @@ rlm_sql_module_t rlm_sql_oracle = {
 	sql_destroy_socket,
 	sql_query,
 	sql_select_query,
+	sql_select_query_bind,  // vinogradov 25.10.2023
 	sql_store_result,
 	sql_num_fields,
 	sql_num_rows,
